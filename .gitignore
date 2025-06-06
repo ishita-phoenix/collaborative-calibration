@@ -5,6 +5,7 @@ venv
 .mypy_cache
 .DS_Store
 Dockerfile
+cc-env
 
 # cache & memory
 data/hf_cache

@@ -9,6 +9,9 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Set, Tuple, Optional, Union
 
+# import sys
+# print("ARGS:", sys.argv)
+
 import numpy as np
 import openai
 import pandas as pd
@@ -60,11 +63,20 @@ MODEL_ENSEMBLE_CHOICES = tuple(
     ]
 )
 
-
+''' selection: dict like {"cot": 2, "pot": 1} -> how many agents of each type
+    model_ensemble: if True, use multiple models from MODEL_ENSEMBLE_CHOICES
+    default_model: if model_ensemble is False, use this model for all agents
+    mix_temperature: if True, use random temperature for each agent (0.5-1.5), otherwise use 1.0
+    use_vllm: whether to load HF models with vllm (for fast inference)
+    
+    returns a pool of agents like {"cot": [agent1, agent2], "pot": [agent3], ...}
+'''
 def populate_expert_agents(
-    selection: Dict[str, int], model_ensemble: bool = False, default_model: str = "gpt-3.5-turbo-1106", mix_temperature: bool = False, use_vllm: bool = False
+    selection: Dict[str, int], model_ensemble: bool = False, default_model: str = "cohere-generate", mix_temperature: bool = False, use_vllm: bool = False
 ) -> Dict[str, Any]:
+    '''pool: dict like {"cot": [agent1, agent2], "pot": [agent3], ...}'''
     pool = {k: [] for k in selection.keys()}
+    '''pretrained_instances: a cache of model/tokenizer pairs, if loading HF models'''
     pretrained_instances = {}
     for choice in set(MODEL_ENSEMBLE_CHOICES):
         if model_ensemble and choice.split("/")[-1] in itertools.chain(*TEST_HF_MODELS.values()):
@@ -101,6 +113,9 @@ def populate_general_agents(size: int) -> List[BaseAgent]:
     return [BaseAgent(id=f"general_{i+1}") for i in range(size)]
 
 
+'''
+Uses sample questions to allocate n_slots to the best performing types
+returns a dictonary detailing number of agents of each type to be allocated, e.g. {"cot": 3, "pot": 2, "search": 1}'''
 def allocate_agent_slots(
     sampled_df: pd.DataFrame, n_slots: int = 12, tau: float = 0.2, use_vllm: bool = False
 ) -> Dict[str, int]:
@@ -145,6 +160,7 @@ def allocate_agent_slots(
     if len(confidence_filtered):
         portions = softmax(list(confidence_filtered.values()))
         confidence_softmax = {_k: portions[i] for (i, _k) in enumerate(confidence_filtered.keys())} 
+        '''sorting by confidence (value) in descending order'''
         confidence_sorted = dict(sorted(confidence_softmax.items(), key=lambda item: item[1], reverse=True))
         logging.info(f"{portions}, sorted: {confidence_sorted}")
         sorted_keys = list(confidence_sorted.keys())
@@ -155,6 +171,7 @@ def allocate_agent_slots(
             final_allocation[sorted_keys[1]] = 1
         else:
             for i, k in enumerate(sorted_keys):
+                '''ERROR: portions[i] is not sorted'''
                 final_allocation.update({k: int(np.floor(portions[i] * n_slots))})
             diff = n_slots - sum(final_allocation.values())
             if diff > 0:
@@ -175,6 +192,17 @@ def allocate_agent_slots(
     return final_allocation
 
 
+''' Construct a set of stances from the votes, merging semantically similar answers.
+    votes: List of tuples (agent_id, model_name, answer_text, verb_confidence (verbal confidence from the agent),
+ sequence_probability (calculated from the model directly using its logits), other_confidence_dict)
+    query: the original question string
+    nli_classifier: optional NLI classifier for semantic equivalence check
+    nli_tokenizer: optional NLI tokenizer for semantic equivalence check
+    filter_abstain: if True, ignore votes where the answer is "abstain"
+    conf_rationales: optional list of confidence rationales for each vote (explains why answer)
+
+    returns stances: List of tuples (unique_answer, mean_verb_confidence, mean_seq_prob, count, confidence_rationale)
+'''
 def construct_stances(
     votes: List[Tuple[str, str, str, float, Union[float, None], Dict[str, float]]],
     query: str,
@@ -186,6 +214,7 @@ def construct_stances(
     # dict{ans_class: [mean_verb_confidence, [seq_prob], count, confidence_rationale]}
     classes = {}
     if filter_abstain:
+        '''remove the answers that contain "abstain" in the text'''
         votes = [vote for vote in votes if "abstain" not in vote[2].lower()]
     for i, (id, model, ans, verb_conf, seq_prob, *_) in enumerate(votes):
         logging.debug(f"construct_stances: {i, id, model, ans, verb_conf, seq_prob}")
@@ -221,6 +250,7 @@ def construct_stances(
     # (unique_ans, mean_verb_confidence, mean_seq_prob, count, confidence_rationale)
     stances = []
     for ans_class, (verb_conf, seq_probs, count, rationale) in classes.items():
+        '''filters out None or 0 values'''
         seq_probs_filtered = [seq_prob for seq_prob in seq_probs if seq_prob]
         seq_probs = np.mean(seq_probs_filtered) if seq_probs_filtered else 0
         logging.debug(f"seq_probs_filtered: {seq_probs_filtered}, seq_probs: {seq_probs}")
@@ -228,7 +258,13 @@ def construct_stances(
     logging.debug(f"final ans_set: {stances}")
     return stances
 
-
+''' Generates the initial stances from the votes of specialized agents (unique using construct_stances method) 
+and has no confidence rationale (probably Stage 1).
+    record: a row from the input DataFrame, containing at least "question" column
+    agents_mapping: dict of agents grouped by their specialization (e.g., {"cot": [agent1, agent2], "pot": [agent3]})
+    nli_tokenizer: optional NLI tokenizer for semantic equivalence check
+    nli_classifier: optional NLI classifier for semantic equivalence check
+'''
 def stance_generation(
     record: pd.Series, agents_mapping: Dict[str, Any], nli_tokenizer: Any, nli_classifier: Any,
 ) -> Tuple[List[Any], List[Any]]:
@@ -237,10 +273,13 @@ def stance_generation(
     for specialization, grouped_agents in agents_mapping.items():
         for agent in grouped_agents:
             if agent.model_type.split("/")[-1] in itertools.chain(*TEST_HF_MODELS.values()) and specialization != "self-ask":
+                '''prob: joint probability of the answer'''
                 prob, res = agent.self_deliberate_with_pretrained_instance(record["question"])
             else:
                 prob = None
                 res = agent.self_deliberate(record["question"])
+                '''extract_conf(res): verbal confidence, 
+                prob: sequence probability (if available) which we can calculate as we have access to the logits'''
             vote = tuple((agent.id, agent.model_type, extract_ans(res), extract_conf(res), prob, extract_conf_metrics(res)))
             votes.append(vote)
     logging.info(f"votes: {votes}")
@@ -248,6 +287,10 @@ def stance_generation(
     return votes, stances
 
 
+''' mappings: List of tuples (agent, initial_conf, original_observations, new_observations)
+
+    returns a list of tuples (agent_id, model_type, answer, final_confidence, sequence_probability (could be none), rationale)
+'''
 def revote(
     question: str, mappings: List[Tuple[BaseAgent, float, str, str]]
 ) -> List[Tuple[str, str, str, float, Union[float, None], str]]:
@@ -260,7 +303,7 @@ def revote(
         prompt += "give rationales for whether you would adjust your original confidence score.\nFollow this format:\n"
         prompt += "Answer:\nRationales:"
         revote_intermediate = agent.chain(ChatPromptTemplate.from_messages([HumanMessagePromptTemplate.from_template(prompt)])).predict().strip()
-
+        '''strip() removes leading/trailing whitespace'''
         logging.debug(f"revote_intermediate: {revote_intermediate}")
         rationale = revote_intermediate.split("Rationales:")[-1].strip()
         prompt_trigger = f"Recall your orignal confidence for your answer was {initial_conf}. "
@@ -268,6 +311,7 @@ def revote(
         revote_conf = agent.chain(ChatPromptTemplate.from_messages([HumanMessagePromptTemplate.from_template(prompt_trigger)])).predict().strip()
 
         try:
+            '''will need to be more careful with the order for brute forcing our answer search (as rationales may come after the confidence)'''
             conf_parsed = float(
                 revote_conf.split("Rationales:")[0].split("Confidence:")[-1].split("\n")[0].strip()
             )
@@ -280,6 +324,18 @@ def revote(
     return votings_all
 
 
+'''Stage 2
+    agents: the list of general agents that will deliberate (non-specialized)
+    stance_list: List of tuples (unique_answer, verb_confidence, model_prob, count, conf_rationale)
+    group_pruning: if True, fewer agents than stances, so you assign proportionally
+    long_form: if True, generate long-form arguments (self-evaluation), otherwise short-form (argument)
+    self_popularity: if True, ask agents to estimate how many people are on their side
+    verify: if True, use verification for the arguments (e.g., no pot or search agents)
+
+    returns: arguments (Dict[answer: argument]),
+    final_votes_raw (List[agent_id, model_type, answer, final_confidence, sequence_probability (could be none), rationale]),
+    final_set (List[unique_answer, mean_verb_confidence, mean_seq_prob, count, confidence_rationale]) --> final stances
+'''
 def deliberate_with_feedback(
     question: str,
     agents: List[BaseAgent],
@@ -316,11 +372,15 @@ def deliberate_with_feedback(
         # m general agents, generate arguments and get moderator feedback
         if group_pruning:
             # m = len(agents) < count of independent votes from stage 1 (number of specialized agents that didn't abstain)
+            '''normalizing'''
             class_freq = class_count / np.sum(class_count)
             logging.debug(f"class_freq: {class_freq}")
             assignment_quantities = np.floor(class_freq * len(agents))
             assignment_quantities = [np.max([quantity, 1]) for quantity in assignment_quantities]
+            '''even though won't ever get count = 0, that edge case may result in wrong calculations like
+            [0,0.5,0.5,0,0] -> [1,2,2,1,1] for 4 agents and 5 classes (we would get [1,2,2,1,-1] which is wrong)'''
             assignment_quantities[-1] = len(agents) - np.sum(assignment_quantities[:-1])
+            '''cummulative sum'''
             assignment_quantities = np.cumsum(assignment_quantities)
         else:
             # exact same assignment as the independent votes from stage 1
@@ -334,18 +394,22 @@ def deliberate_with_feedback(
             # stance_list already sorted
             if index == assignment_quantities[curr_stance_index]:
                 curr_stance_index += 1
+            '''shouldn't this checking be done before the previous if?'''
             if curr_stance_index == len(assignment_quantities):
                 break
             assigned_ans, initial_verb_conf, initial_seq_prob, count, _ = stance_list[curr_stance_index]  
-            initial_conf = max(initial_verb_conf, initial_seq_prob)         
+            initial_conf = max(initial_verb_conf, initial_seq_prob)
+            '''doesn't follow the structre defined in the docstring, but it is fine for now (as it changes it later)'''
             agents_observations_mapping.append([agent, assigned_ans, initial_conf, count])
             if long_form:
+                '''why does it store only the last long form answer? shouldn't it store every response?'''
                 arguments[assigned_ans] = agent.generate_self_evaluation(question, assigned_ans)
             else:
                 if not arguments.get(assigned_ans):
                     arguments[assigned_ans] = agent.generate_argument(question, assigned_ans)
         logging.info(f"deliberator arguments: {arguments}")
 
+        '''arguments passed to a moderator (NLI-based) who evaluates the soundness of the arguments'''
         ranking = get_collective_feedback(question, arguments, nli_tokenizer, nli_classifier, verify)
         # ranking: [<ans, argument, soundness_score, verbal_feedback>], sorted by soundness_score desc
         logging.debug(f"ranking {question}; {ranking}")
@@ -377,14 +441,27 @@ def deliberate_with_feedback(
             agents_observations_mapping[i] = tuple((agent, initial_conf, original_observations, new_observations))
 
     # re-voting with new observations (and the corresponding ranking/feedback, if no early consensus)
+    ''' returns (agent_id, model_type, answer, final_confidence, sequence_probability (could be none), rationale)'''
     final_votes_raw = revote(question, agents_observations_mapping)
     rationales = [vote[-1] for vote in final_votes_raw]
+    '''creates the final set of stances
+    votes: List of tuples (agent_id, model_name, answer_text, verb_confidence, sequence_probability, other_confidence_dict)'''
+    '''(final) stances: List of tuples (unique_answer, mean_verb_confidence, mean_seq_prob, count, confidence_rationale)'''
     final_set = construct_stances(
         final_votes_raw, question, nli_classifier, nli_tokenizer, conf_rationales=rationales
     )
     return arguments, final_votes_raw, final_set
 
-
+''' Saves the vote history to a JSONL file.
+    question_id: the ID of the question
+    original_votes: List of tuples (agent_id, model, answer, verbal_confidence, sequence_probability, confidence_metrics)
+    original_stance_list: List of tuples (answer_class, avg_verbal_confidence, avg_sequence_probability, count, rationale)
+    final_votes: List of tuples (agent_id, model, answer, final_confidence, sequence_probability, rationale)
+    final_stance_list: List of tuples (answer_class, avg_verbal_confidence, avg_sequence_probability, count, rationale)
+    final_majority: Tuple (final_majority_ans, final_verbal_confidence, final_count, final_rationale)
+    output_filepath: Path to the output directory
+    dataset: the name of the dataset (for file naming)
+'''
 def save_vote_history(
     question_id: str,
     original_votes: List[Any],
@@ -434,6 +511,9 @@ def save_agent_info(agent: BaseAgent, dirpath: str = "data/memory/agents/"):
     with open(f"{str(output_filepath)}/info_{agent.id}.json", "w+") as outfile:
         json.dump(api_call_info | agent_info, outfile)
 
+''' expert_agent_pool: dict of agents grouped by their specialization (e.g., {"cot": [agent1, agent2], "pot": [agent3]})
+    general_agent_pool: List of general agents (non-specialized)
+'''
 def agents_deliberation_single_thread(
     df: pd.DataFrame,
     expert_agent_pool: Dict[str, Any],
@@ -480,6 +560,9 @@ def agents_deliberation_single_thread(
                 save_agent_info(agent)
 
 
+''' Allocates slots for expert agents based on the validation data and group size.
+    group_size: number of agents to allocate
+'''
 def allocate_slots(model_ensemble: bool, group_size: int, validation_data: pd.DataFrame, use_vllm: bool = False):
     # if using model_ensemble (k models), allocation_size = size(expert_agents) // k
     if model_ensemble:
@@ -516,6 +599,7 @@ def main(args):
 
     test_data, dev_data = sample_input_data(args.input_dataset, args.test_sample_size, args.dev_sample_size)
 
+    '''training (which agents to use)'''
     # Stage 1 agents
     if args.agent_ensemble and not args.long_form:
         # auto-select
@@ -535,8 +619,11 @@ def main(args):
     # nli_tokenizer, nli_classifier = load_entailment_classifier()
     nli_tokenizer, nli_classifier = None, None
 
+    '''testing (results of the test data on agents found by train data)'''
+    '''splits the data into n_thread chunks'''
     df_list = np.array_split(test_data, args.n_thread)
     Path(args.memory_filepath).mkdir(parents=True, exist_ok=True)
+    '''submits each data chunk into a thread, and each thread executes the agents_delibration_single_thread function'''
     with ThreadPoolExecutor(max_workers=args.n_thread) as executor:
         futures = [
             executor.submit(
