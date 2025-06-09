@@ -1,7 +1,6 @@
 """Load pretrained models from Huggingface and do inference"""
 from typing import Any
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM, BitsAndBytesConfig, GenerationConfig
-
 from vllm import LLM, SamplingParams
 from huggingface_hub import login
 import torch

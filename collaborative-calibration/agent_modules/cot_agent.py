@@ -11,8 +11,6 @@ from .base_agent import BaseAgent
 
 class CoTAgent(BaseAgent):
     """Class for Chain-of-Thought style agents"""
-    # def __init__(self, *args, **kwargs):
-    #     super().__init__(*args, **kwargs)
 
     system_msg = "You are a helpful AI agent good at multi-hop and arithmetic reasoning."
     abstain_msg = "If you don't think the question can be solved step by step, simply say 'Abstain' and nothing else."
