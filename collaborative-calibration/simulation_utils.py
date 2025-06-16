@@ -442,22 +442,23 @@ def call_api(
 ) -> str:
     """Perform a single api call with specified model and prompt."""
     openai.api_key = os.getenv("OPENAI_API_KEY") or api_key
+    # client = openai.OpenAI(api_key=openai.api_key)
     if model in TEST_API_MODELS["openai-chat"]:
         messages = [{"role": "system", "content": sys_msg}] if sys_msg else []
         messages.append({"role": "user", "content": prompt})
-        response = openai.ChatCompletion.create(
-            model=model,
-            messages=messages,
-            temperature=1.0,
-            max_tokens=1024,
-            stop=stop,
-            request_timeout=900,
+        response = openai.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=1.0,
+        max_tokens=1024,
+        stop=stop,
+        timeout=900,
         )
-        msg = response["choices"][0]["message"]
-        assert msg["role"] == "assistant", "Incorrect role returned."
-        ans = msg["content"]
+        msg = response.choices[0].message
+        assert msg.role == "assistant", "Incorrect role returned."
+        ans = msg.content
     elif model in TEST_API_MODELS["openai-completion"]:
-        response = openai.Completion.create(
+        response = openai.completions.create(
             model=model,
             prompt=prompt,
             temperature=1.0,
@@ -465,12 +466,32 @@ def call_api(
             top_p=1,
             frequency_penalty=0.0,
             presence_penalty=0.0,
-            stop=stop,
+            stop=stop if stop else None,
+            timeout=900,
         )
-        ans = response["choices"][0]["text"]
+        ans = response.choices[0].text
+        # response = openai.Completion.create(
+        #     model=model,
+        #     prompt=prompt,
+        #     temperature=1.0,
+        #     max_tokens=1024,
+        #     top_p=1,
+        #     frequency_penalty=0.0,
+        #     presence_penalty=0.0,
+        #     stop=stop,
+        # )
+        # ans = response["choices"][0]["text"]
     elif model in TEST_API_MODELS["cohere"]:
         response = cohere.Client.generate(prompt=prompt, max_tokens=1024, stop_sequences=stop)
         ans = response.text.strip()
+        # co = cohere.Client(os.getenv("COHERE_API_KEY") or api_key)
+        # response = co.chat(
+        #     model=model,
+        #     message=prompt,
+        #     temperature=0.3,
+        #     max_tokens=1024,
+        # )
+        # ans = response.text.strip()
     else:
         raise NotImplementedError
     return ans

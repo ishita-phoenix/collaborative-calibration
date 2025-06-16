@@ -138,6 +138,7 @@ def allocate_agent_slots(
     for j, question in enumerate(sampled_questions):
         for key, agent_group in initial_agents.items():
             for agent in agent_group:
+                logging.debug(f"agent type: {key}, agent: {agent}")
                 res = agent.self_deliberate(query=question)
                 if "Abstain" in res:
                     adjusted_confidence_all[key].append(0.0)
