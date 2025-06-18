@@ -72,7 +72,7 @@ MODEL_ENSEMBLE_CHOICES = tuple(
     returns a pool of agents like {"cot": [agent1, agent2], "pot": [agent3], ...}
 '''
 def populate_expert_agents(
-    selection: Dict[str, int], model_ensemble: bool = False, default_model: str = "cohere-generate", mix_temperature: bool = False, use_vllm: bool = False
+    selection: Dict[str, int], model_ensemble: bool = False, default_model: str = "mistralai/Mistral-7B-Instruct-v0.1", mix_temperature: bool = False, use_vllm: bool = False
 ) -> Dict[str, Any]:
     '''pool: dict like {"cot": [agent1, agent2], "pot": [agent3], ...}'''
     pool = {k: [] for k in selection.keys()}
@@ -135,11 +135,23 @@ def allocate_agent_slots(
     adjusted_confidence_all = {k: [] for k in initialization.keys()}
     sampled_questions = sampled_df["question"].values.tolist()
     reference_answers = sampled_df["reference_answers"].values.tolist()
+    pretrained_instances = {}
     for j, question in enumerate(sampled_questions):
         for key, agent_group in initial_agents.items():
             for agent in agent_group:
+                model_name = agent.model_type
                 logging.debug(f"agent type: {key}, agent: {agent}")
-                res = agent.self_deliberate(query=question)
+                if agent.model_type.split("/")[-1] in itertools.chain(*TEST_HF_MODELS.values()) and key != "self-ask":
+                    if model_name not in pretrained_instances:
+                        pretrained_instances[model_name] = load_causal_lm(
+                            model_name, access_token=os.getenv("HF_TOKEN"), use_vllm=use_vllm
+                        )
+                    '''prob: joint probability of the answer'''
+                    prob, res = agent.self_deliberate_with_pretrained_instance(query=question)
+                else:
+                    prob = None
+                    res = agent.self_deliberate(query=question)
+                # res = agent.self_deliberate(query=question)
                 if "Abstain" in res:
                     adjusted_confidence_all[key].append(0.0)
                 else:
