@@ -19,34 +19,34 @@ def load_entailment_classifier(nli_model: str = DEFAULT_NLI_CLS, cache_dir: str 
     logging.debug("entailment_classifier loaded")
     return nli_tokenizer, nli_classifier
 
-# def load_causal_lm(model_id: str, cache_dir: str = DEFAULT_CACHE_DIR, access_token: Any = None, use_vllm: bool = False):
-#     if "llama" in model_id.lower():
-#         assert access_token, "HF access token required."
-#     if use_vllm:
-#         # known issue: concurrent inference
-#         # https://github.com/vllm-project/vllm/issues/1285
-#         # https://github.com/vllm-project/vllm/issues/1200
-#         # e.g Llama-2-13b-chat-hf, Mistral-7B-Instruct-v0.1, vicuna-13b-v1.3
-#         login(token=access_token)
-#         logging.debug(GenerationConfig.from_pretrained(model_id))
-#         vllm_model = LLM(model=model_id, trust_remote_code=True, download_dir=cache_dir)
-#         logging.debug(f"{model_id} loaded with {vllm_model}")
-#         return None, vllm_model
-#     else:
-#         bnb_config = BitsAndBytesConfig(
-#             load_in_4bit=True,
-#             bnb_4bit_use_double_quant=True,
-#             bnb_4bit_quant_type="nf4",
-#             bnb_4bit_compute_dtype=torch.bfloat16
-#         )
-#         tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True, 
-#                                               cache_dir=cache_dir, 
-#                                               use_auth_token=access_token)
-#         model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto", quantization_config=bnb_config, 
-#                                                     cache_dir=cache_dir, 
-#                                                     use_auth_token=access_token)   
-#         logging.debug(f"{model_id} loaded")
-#         return tokenizer, model
+def load_causal_lm(model_id: str, cache_dir: str = DEFAULT_CACHE_DIR, access_token: Any = None, use_vllm: bool = False):
+    if "llama" in model_id.lower():
+        assert access_token, "HF access token required."
+    if use_vllm:
+        # known issue: concurrent inference
+        # https://github.com/vllm-project/vllm/issues/1285
+        # https://github.com/vllm-project/vllm/issues/1200
+        # e.g Llama-2-13b-chat-hf, Mistral-7B-Instruct-v0.1, vicuna-13b-v1.3
+        login(token=access_token)
+        logging.debug(GenerationConfig.from_pretrained(model_id))
+        vllm_model = LLM(model=model_id, trust_remote_code=True, download_dir=cache_dir)
+        logging.debug(f"{model_id} loaded with {vllm_model}")
+        return None, vllm_model
+    else:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+        tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True, 
+                                              cache_dir=cache_dir, 
+                                              use_auth_token=access_token)
+        model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto", quantization_config=bnb_config, 
+                                                    cache_dir=cache_dir, 
+                                                    use_auth_token=access_token)   
+        logging.debug(f"{model_id} loaded")
+        return tokenizer, model
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
@@ -74,6 +74,63 @@ def load_causal_lm(model_id, use_quantization=False, access_token: Any = None, u
         ).to("cpu")
 
     return tokenizer, model
+
+# from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+# from huggingface_hub import login
+# import torch
+# import logging
+# import os
+
+# DEFAULT_CACHE_DIR = "data/hf_cache"  # you can set this to your preferred cache path
+
+# def load_causal_lm(model_id: str, cache_dir: str = DEFAULT_CACHE_DIR, access_token: any = None, use_vllm: bool = False):
+#     if "llama" in model_id.lower():
+#         assert access_token, "HF access token required for LLaMA models."
+
+#     if use_vllm:
+#         try:
+#             from vllm import LLM  # ensure vllm is installed correctly
+#             login(token=access_token)
+#             vllm_model = LLM(model=model_id, trust_remote_code=True, download_dir=cache_dir)
+#             logging.debug(f"{model_id} loaded with vLLM.")
+#             return None, vllm_model
+#         except ImportError as e:
+#             logging.warning("vLLM not available. Falling back to HuggingFace Transformers.")
+#             use_vllm = False
+
+#     # Fallback to standard HuggingFace model
+#     tokenizer = AutoTokenizer.from_pretrained(
+#         model_id,
+#         use_fast=True,
+#         cache_dir=cache_dir,
+#         token=access_token
+#     )
+
+#     if torch.cuda.is_available():
+#         bnb_config = BitsAndBytesConfig(
+#             load_in_4bit=True,
+#             bnb_4bit_use_double_quant=True,
+#             bnb_4bit_quant_type="nf4",
+#             bnb_4bit_compute_dtype=torch.bfloat16
+#         )
+#         model = AutoModelForCausalLM.from_pretrained(
+#             model_id,
+#             device_map="auto",
+#             quantization_config=bnb_config,
+#             cache_dir=cache_dir,
+#             token=access_token
+#         )
+#     else:
+#         # CPU-only fallback (e.g., for Mac)
+#         model = AutoModelForCausalLM.from_pretrained(
+#             model_id,
+#             torch_dtype=torch.float32,
+#             cache_dir=cache_dir,
+#             token=access_token
+#         ).to("cpu")
+
+#     logging.debug(f"{model_id} loaded on {'GPU' if torch.cuda.is_available() else 'CPU'}.")
+#     return tokenizer, model
 
 
 def causal_lm_generate(tokenizer: Any, model: Any, prompt: str, max_new_tokens: int = 256, return_joint_prob: bool = True, use_hf_template: bool = False):

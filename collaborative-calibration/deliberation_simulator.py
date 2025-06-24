@@ -100,9 +100,16 @@ def populate_expert_agents(
                         )
                     )
             else:
+                pretrained_inst = None
+                if default_model.split("/")[-1] in itertools.chain(*TEST_HF_MODELS.values()):
+                    pretrained_inst = load_causal_lm(
+                        default_model,
+                        access_token=os.getenv("HF_TOKEN"),
+                        use_vllm=use_vllm
+                    )
                 pool[k].append(
                     PROMPTING_STRATEGY_MAPPING[k](
-                        id=f"{k}-agent_{i+1}_{default_model}", model_type=default_model, model_temperature=temperature
+                        id=f"{k}-agent_{i+1}_{default_model}", model_type=default_model, pretrained=pretrained_inst, model_temperature=temperature
                     )
                 )
     logging.debug(f"agents populated: {pool}")
@@ -135,17 +142,18 @@ def allocate_agent_slots(
     adjusted_confidence_all = {k: [] for k in initialization.keys()}
     sampled_questions = sampled_df["question"].values.tolist()
     reference_answers = sampled_df["reference_answers"].values.tolist()
-    pretrained_instances = {}
+    # pretrained_instances = {}
+    # logging.debug(f'pretrained instances: {pretrained_instances}')
     for j, question in enumerate(sampled_questions):
         for key, agent_group in initial_agents.items():
             for agent in agent_group:
-                model_name = agent.model_type
+                # model_name = agent.model_type
                 logging.debug(f"agent type: {key}, agent: {agent}")
                 if agent.model_type.split("/")[-1] in itertools.chain(*TEST_HF_MODELS.values()) and key != "self-ask":
-                    if model_name not in pretrained_instances:
-                        pretrained_instances[model_name] = load_causal_lm(
-                            model_name, access_token=os.getenv("HF_TOKEN"), use_vllm=use_vllm
-                        )
+                    # if model_name not in pretrained_instances:
+                    #     pretrained_instances[model_name] = load_causal_lm(
+                    #         model_name, access_token=os.getenv("HF_TOKEN"), use_vllm=use_vllm
+                    #     )
                     '''prob: joint probability of the answer'''
                     prob, res = agent.self_deliberate_with_pretrained_instance(query=question)
                 else:
